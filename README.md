@@ -12,6 +12,19 @@ OVOS TTS plugin for [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) by K
 pip install ovos-tts-plugin-pocket-tts
 ```
 
+With `uv`, torch automatically resolves to the CPU-only wheel (configured via `tool.uv.sources`).
+
+### Linux: CPU-only torch (saves ~2GB)
+
+On Linux, pip defaults to the CUDA torch wheel (~2.5GB). If you don't need GPU support (pocket-tts is CPU-only anyway), install torch from the CPU index first:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install ovos-tts-plugin-pocket-tts
+```
+
+On macOS, this is not needed — PyPI torch is already CPU-only (~60MB).
+
 ## Configuration
 
 ```json
