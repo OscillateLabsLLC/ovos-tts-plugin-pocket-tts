@@ -136,10 +136,11 @@ class PocketTTSPlugin(TTS):
         model = _get_model()
         voice_state = _get_voice_state(model, voice)
 
-        audio = model.generate_audio(voice_state, sentence)
+        audio = model.generate_audio(voice_state, _PREFIX + sentence)
         # Clamp to [-1, 1] and convert to 16-bit PCM — matches the official CLI.
         # Raw float32 can exceed [-1, 1] and float WAV is poorly supported.
         audio_np = audio.clamp(-1, 1).numpy()
+        audio_np = _trim_prefix(audio_np, model.sample_rate)
 
         # Resample to configured rate (default 16000) for ALSA compatibility.
         # OVOS does not resample — raw ALSA will garble non-native rates.
