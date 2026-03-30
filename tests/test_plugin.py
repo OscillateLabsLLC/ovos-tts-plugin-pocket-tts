@@ -37,7 +37,9 @@ def test_config_dict():
 
 @patch("ovos_tts_plugin_pocket_tts.tts._get_model")
 def test_get_tts(mock_get_model, tmp_path):
-    # Create a fake audio signal: 1s of sine wave so prefix trimming has something to work with
+    import wave
+
+    # Create a fake audio tensor that supports .clamp().numpy()
     sample_rate = 24000
     t = np.linspace(0, 1.0, sample_rate, dtype=np.float32)
     fake_audio = np.sin(2 * np.pi * 440 * t)
@@ -45,6 +47,7 @@ def test_get_tts(mock_get_model, tmp_path):
     mock_model = MagicMock()
     mock_model.sample_rate = sample_rate
     mock_audio = MagicMock()
+    mock_audio.clamp.return_value = mock_audio
     mock_audio.numpy.return_value = fake_audio
     mock_model.generate_audio.return_value = mock_audio
     mock_model.get_state_for_audio_prompt.return_value = "fake_state"
@@ -59,10 +62,15 @@ def test_get_tts(mock_get_model, tmp_path):
     assert result == wav_file
     assert phonemes is None
     mock_model.generate_audio.assert_called_once()
+    mock_audio.clamp.assert_called_once_with(-1, 1)
     # Verify the prefix was prepended
     call_args = mock_model.generate_audio.call_args
     assert call_args[0][1].startswith("... ")
-    assert (tmp_path / "test.wav").exists()
+    # Verify valid 16-bit PCM WAV
+    with wave.open(wav_file, "rb") as wf:
+        assert wf.getsampwidth() == 2
+        assert wf.getnchannels() == 1
+        assert wf.getframerate() == sample_rate
 
 
 def test_trim_prefix_with_silence_gap():

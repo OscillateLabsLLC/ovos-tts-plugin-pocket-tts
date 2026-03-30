@@ -124,7 +124,7 @@ class PocketTTSPlugin(TTS):
         super().__init__(config=config, audio_ext="wav")
 
     def get_tts(self, sentence: str, wav_file: str, lang: str = None, voice: str = None) -> tuple:
-        import scipy.io.wavfile
+        import wave
 
         voice = voice or self.config.get("voice", DEFAULT_VOICE)
 
@@ -137,10 +137,17 @@ class PocketTTSPlugin(TTS):
         voice_state = _get_voice_state(model, voice)
 
         audio = model.generate_audio(voice_state, _PREFIX + sentence)
-        audio_np = audio.numpy()
+        # Clamp to [-1, 1] and convert to 16-bit PCM — matches the official CLI.
+        # Raw float32 can exceed [-1, 1] and float WAV is poorly supported.
+        audio_np = audio.clamp(-1, 1).numpy()
         audio_np = _trim_prefix(audio_np, model.sample_rate)
+        audio_int16 = (audio_np * 32767).astype(np.int16)
 
-        scipy.io.wavfile.write(wav_file, model.sample_rate, audio_np)
+        with wave.open(wav_file, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(model.sample_rate)
+            wf.writeframes(audio_int16.tobytes())
 
         return wav_file, None
 
