@@ -5,7 +5,7 @@ import struct
 from typing import AsyncIterable
 
 import numpy as np
-from ovos_plugin_manager.templates.tts import StreamingTTS
+from ovos_plugin_manager.templates.tts import TTS
 from ovos_utils.log import LOG
 
 
@@ -137,7 +137,7 @@ def _make_wav_header(sample_rate: int, num_samples: int) -> bytes:
     )
 
 
-class PocketTTSPlugin(StreamingTTS):
+class PocketTTSPlugin(TTS):
     """Pocket TTS — 100M param, CPU-only, real-time TTS by Kyutai.
 
     Config example (mycroft.conf):
