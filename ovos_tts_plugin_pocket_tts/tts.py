@@ -162,6 +162,14 @@ class PocketTTSPlugin(TTS):
 
         return wav_file, None
 
+    def shutdown(self):
+        """Release cached model and voice states to free memory."""
+        global _model, _voice_states
+        if _model is not None:
+            LOG.info("Shutting down Pocket TTS — releasing model and voice states")
+            _model = None
+            _voice_states.clear()
+
     @staticmethod
     def available_languages() -> set:
         return {"en"}
