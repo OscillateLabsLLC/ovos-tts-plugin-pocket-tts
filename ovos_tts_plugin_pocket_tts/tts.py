@@ -140,12 +140,23 @@ class PocketTTSPlugin(TTS):
         # Clamp to [-1, 1] and convert to 16-bit PCM — matches the official CLI.
         # Raw float32 can exceed [-1, 1] and float WAV is poorly supported.
         audio_np = audio.clamp(-1, 1).numpy()
+
+        # Resample to configured rate (default 16000) for ALSA compatibility.
+        # OVOS does not resample — raw ALSA will garble non-native rates.
+        native_rate = model.sample_rate
+        target_rate = int(self.config.get("sample_rate", 16000))
+        if native_rate != target_rate:
+            from scipy.signal import resample
+
+            num_samples = int(len(audio_np) * target_rate / native_rate)
+            audio_np = resample(audio_np, num_samples).astype(np.float32)
+
         audio_int16 = (audio_np * 32767).astype(np.int16)
 
         with wave.open(wav_file, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
-            wf.setframerate(model.sample_rate)
+            wf.setframerate(target_rate)
             wf.writeframes(audio_int16.tobytes())
 
         return wav_file, None
