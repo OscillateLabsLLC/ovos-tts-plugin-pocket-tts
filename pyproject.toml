@@ -49,6 +49,10 @@ dev = [
     "pytest>=8.3.4",
     "pytest-cov>=6.0.0",
     "ruff>=0.9.0",
+    # ovos-plugin-manager imports pkg_resources, which setuptools 81 removed.
+    # Pin to a version that still ships it so tests can run. Drop this once
+    # ovos-plugin-manager stops importing pkg_resources.
+    "setuptools<81",
 ]
 
 [tool.pytest.ini_options]
