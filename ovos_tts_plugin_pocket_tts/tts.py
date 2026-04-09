@@ -1,17 +1,21 @@
 """Pocket TTS plugin for OVOS — lightweight, CPU-only TTS by Kyutai."""
 
+import inspect
 import os
 import struct
-from typing import AsyncIterable
+from typing import AsyncIterable, Dict, Optional
 
 import numpy as np
 from ovos_plugin_manager.templates.tts import TTS
+from ovos_utils.lang import standardize_lang_tag
 from ovos_utils.log import LOG
 
 
-# Lazy-loaded to keep import time < 500ms for opm-check
-_model = None
-_voice_states = {}
+# Lazy-loaded model cache, keyed by kyutai language id (e.g. "english_v2",
+# "french_24l"). Single-language pocket-tts builds always live under the
+# "english_v2" key so the rest of the code stays uniform.
+_models: Dict[str, "object"] = {}
+_voice_states: Dict[str, "object"] = {}
 
 BUILTIN_VOICES = (
     "alba", "marius", "javert", "jean",
@@ -19,6 +23,45 @@ BUILTIN_VOICES = (
 )
 
 DEFAULT_VOICE = "alba"
+
+# Map BCP-47 base language codes to the kyutai pocket-tts language id.
+# Users can override or extend this via the `language_aliases` config key.
+# Keys are the lower-cased base language (the part before the dash in a
+# BCP-47 tag), values are the pocket-tts `language=` argument.
+_DEFAULT_LANG_MAP: Dict[str, str] = {
+    "en": "english_v2",
+    "fr": "french_24l",
+    "de": "german_24l",
+    "es": "spanish_24l",
+    "it": "italian_24l",
+    "pt": "portuguese_24l",
+}
+
+# Cached at module import — does the installed pocket-tts expose the
+# `language=` kwarg on `TTSModel.load_model`? See kyutai-labs/pocket-tts#155.
+_MULTILINGUAL_SUPPORTED: Optional[bool] = None
+_QUANTIZE_SUPPORTED: Optional[bool] = None
+
+
+def _detect_pocket_tts_capabilities():
+    """Inspect the installed pocket-tts to see which kwargs `load_model` accepts.
+
+    Returns a (multilingual, quantize) tuple of booleans. Defers the import
+    so plugin import stays cheap, but caches the result on first call.
+    """
+    global _MULTILINGUAL_SUPPORTED, _QUANTIZE_SUPPORTED
+    if _MULTILINGUAL_SUPPORTED is not None:
+        return _MULTILINGUAL_SUPPORTED, _QUANTIZE_SUPPORTED
+    try:
+        from pocket_tts import TTSModel
+        params = inspect.signature(TTSModel.load_model).parameters
+        _MULTILINGUAL_SUPPORTED = "language" in params
+        _QUANTIZE_SUPPORTED = "quantize" in params
+    except Exception as err:
+        LOG.warning("Could not introspect pocket_tts.TTSModel.load_model: %s", err)
+        _MULTILINGUAL_SUPPORTED = False
+        _QUANTIZE_SUPPORTED = False
+    return _MULTILINGUAL_SUPPORTED, _QUANTIZE_SUPPORTED
 
 # Sacrificial prefix to prevent first-word swallowing.
 # Pocket-tts blends the voice prompt into the start of generation, which can
@@ -31,19 +74,54 @@ _PREFIX_SILENCE_GAP = 0.08   # seconds — minimum silence to count as gap
 _SILENCE_THRESHOLD = 0.01    # fraction of max amplitude
 
 
-def _get_model():
-    """Lazy-load and cache the Pocket TTS model."""
-    global _model
-    if _model is None:
-        from pocket_tts import TTSModel
+def _resolve_lang(lang: Optional[str], lang_map: Dict[str, str]) -> str:
+    """Map a BCP-47 language tag to a kyutai pocket-tts language id.
 
-        LOG.info("Loading Pocket TTS model (first call — weights will download if needed)")
-        _model = TTSModel.load_model()
-        LOG.info("Pocket TTS model loaded")
-    return _model
+    Lookup order:
+      1. Full BCP-47 tag (e.g. "pt-br") — lets users distinguish region
+         variants when upstream eventually ships them.
+      2. Base language subtag (e.g. "pt") — the common case.
+      3. English fallback.
+
+    On a legacy single-language pocket-tts build the result is always
+    "english_v2"; the lookup is short-circuited.
+    """
+    multilingual, _ = _detect_pocket_tts_capabilities()
+    if not multilingual:
+        return "english_v2"
+    if not lang:
+        return lang_map.get("en", "english_v2")
+    canonical = standardize_lang_tag(lang).lower()
+    if canonical in lang_map:
+        return lang_map[canonical]
+    base = canonical.split("-")[0]
+    return lang_map.get(base, lang_map.get("en", "english_v2"))
 
 
-def _get_voice_state(model, voice: str):
+def _get_model(kyutai_lang: str, quantize: bool = False):
+    """Lazy-load and cache the Pocket TTS model for a given kyutai language id."""
+    if kyutai_lang in _models:
+        return _models[kyutai_lang]
+    from pocket_tts import TTSModel
+
+    multilingual, quantize_supported = _detect_pocket_tts_capabilities()
+    kwargs = {}
+    if multilingual:
+        kwargs["language"] = kyutai_lang
+    if quantize_supported and quantize:
+        kwargs["quantize"] = True
+
+    LOG.info(
+        "Loading Pocket TTS model (lang=%s, quantize=%s) — first call may download weights",
+        kyutai_lang if multilingual else "english (legacy)",
+        bool(kwargs.get("quantize", False)),
+    )
+    _models[kyutai_lang] = TTSModel.load_model(**kwargs)
+    LOG.info("Pocket TTS model loaded for %s", kyutai_lang)
+    return _models[kyutai_lang]
+
+
+def _get_voice_state(model, voice: str, kyutai_lang: str):
     """Get or cache a voice state for the given voice identifier.
 
     voice can be:
@@ -51,11 +129,15 @@ def _get_voice_state(model, voice: str):
       - A path to a .wav file (voice cloning)
       - A path to a .safetensors file (exported voice state)
       - A HuggingFace URI (hf://kyutai/tts-voices/...)
+
+    The cache is keyed by (kyutai_lang, voice) because voice state tensors
+    are produced by a specific language model and are not interchangeable.
     """
-    if voice not in _voice_states:
-        LOG.info(f"Loading voice state for: {voice}")
-        _voice_states[voice] = model.get_state_for_audio_prompt(voice)
-    return _voice_states[voice]
+    key = f"{kyutai_lang}::{voice}"
+    if key not in _voice_states:
+        LOG.info("Loading voice state for: %s (lang=%s)", voice, kyutai_lang)
+        _voice_states[key] = model.get_state_for_audio_prompt(voice)
+    return _voice_states[key]
 
 
 def _trim_prefix(audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -158,14 +240,52 @@ class PocketTTSPlugin(TTS):
 
     def __init__(self, config=None):
         super().__init__(config=config, audio_ext="wav")
+        # Preload requested languages so the first speak() doesn't pay the
+        # download/load cost. Optional — most users will leave this empty
+        # and let _get_model lazy-load on demand.
+        for code in self.config.get("preload_languages", []):
+            try:
+                self._load_language(code)
+            except Exception as err:
+                LOG.warning("Failed to preload pocket-tts language %s: %s", code, err)
+
+    @property
+    def lang_map(self) -> Dict[str, str]:
+        """Effective BCP-47 → kyutai language id map (default + user overrides)."""
+        return {**_DEFAULT_LANG_MAP, **self.config.get("language_aliases", {})}
+
+    def _quantize_for(self, kyutai_lang: str) -> bool:
+        """Whether to enable quantization for a given kyutai language id.
+
+        Defaults to True for the 24-layer preview models (where the maintainer
+        recommends quantization for speed) and False for the distilled english
+        defaults. Users can override per-language via the `quantize` config
+        knob (bool or dict-of-booleans-keyed-by-kyutai-lang).
+        """
+        override = self.config.get("quantize")
+        if isinstance(override, dict):
+            if kyutai_lang in override:
+                return bool(override[kyutai_lang])
+        elif override is not None:
+            return bool(override)
+        return kyutai_lang.endswith("_24l")
+
+    def _load_language(self, lang_or_code: str):
+        """Resolve a BCP-47 (or kyutai) code and warm the model cache."""
+        if lang_or_code in self.lang_map.values():
+            kyutai_lang = lang_or_code
+        else:
+            kyutai_lang = _resolve_lang(lang_or_code, self.lang_map)
+        return _get_model(kyutai_lang, quantize=self._quantize_for(kyutai_lang))
 
     def get_tts(self, sentence: str, wav_file: str, lang: str = None, voice: str = None) -> tuple:
         """Synchronous TTS with prefix trimming and resampling."""
         import wave
 
         voice = _resolve_voice(voice or self.config.get("voice", DEFAULT_VOICE))
-        model = _get_model()
-        voice_state = _get_voice_state(model, voice)
+        kyutai_lang = _resolve_lang(lang or self.lang, self.lang_map)
+        model = _get_model(kyutai_lang, quantize=self._quantize_for(kyutai_lang))
+        voice_state = _get_voice_state(model, voice, kyutai_lang)
 
         audio = model.generate_audio(voice_state, _PREFIX + sentence)
         audio_np = audio.clamp(-1, 1).numpy()
@@ -183,16 +303,23 @@ class PocketTTSPlugin(TTS):
 
         return wav_file, None
 
-    async def stream_tts(self, sentence: str, **kwargs) -> AsyncIterable[bytes]:
+    async def stream_tts(
+        self,
+        sentence: str,
+        lang: Optional[str] = None,
+        voice: Optional[str] = None,
+        **kwargs,
+    ) -> AsyncIterable[bytes]:
         """Stream TTS audio chunks as they become available.
 
         Buffers the first ~1s of audio to trim the sacrificial prefix,
         then yields remaining chunks as raw PCM bytes wrapped in a WAV
         container.
         """
-        voice = _resolve_voice(kwargs.get("voice") or self.config.get("voice", DEFAULT_VOICE))
-        model = _get_model()
-        voice_state = _get_voice_state(model, voice)
+        voice = _resolve_voice(voice or self.config.get("voice", DEFAULT_VOICE))
+        kyutai_lang = _resolve_lang(lang or self.lang, self.lang_map)
+        model = _get_model(kyutai_lang, quantize=self._quantize_for(kyutai_lang))
+        voice_state = _get_voice_state(model, voice, kyutai_lang)
         native_rate = model.sample_rate
         target_rate = int(self.config.get("sample_rate", 16000))
 
@@ -222,29 +349,53 @@ class PocketTTSPlugin(TTS):
         yield audio_int16.tobytes()
 
     def shutdown(self):
-        """Release cached model and voice states to free memory."""
-        global _model, _voice_states
-        if _model is not None:
-            LOG.info("Shutting down Pocket TTS — releasing model and voice states")
-            _model = None
+        """Release cached models and voice states to free memory."""
+        if _models:
+            LOG.info("Shutting down Pocket TTS — releasing %d model(s) and voice states", len(_models))
+            _models.clear()
             _voice_states.clear()
 
-    @staticmethod
-    def available_languages() -> set:
-        return {"en"}
+    @classmethod
+    def available_languages(cls) -> set:
+        """Return BCP-47 base language codes this plugin can serve.
+
+        On a legacy single-language pocket-tts install this is just {"en"}.
+        On a multilingual install (kyutai-labs/pocket-tts#155 or later) it
+        returns the full set of mapped languages.
+        """
+        multilingual, _ = _detect_pocket_tts_capabilities()
+        if not multilingual:
+            return {"en"}
+        return set(_DEFAULT_LANG_MAP.keys())
 
 
-PocketTTSPluginConfig = {
-    "en": [
-        {
-            "voice": voice_name,
-            "meta": {
-                "gender": "male" if voice_name in ("marius", "javert", "jean") else "female",
-                "display_name": f"Pocket TTS — {voice_name.title()}",
-                "offline": True,
-                "priority": 60,
-            },
-        }
-        for voice_name in BUILTIN_VOICES
-    ]
-}
+def _build_plugin_config():
+    """Build the OPM PocketTTSPluginConfig advertisement.
+
+    Emits one entry per (language, builtin_voice) pair so OPM can show
+    every voice in the picker. Advertises the full multilingual set
+    unconditionally — calling `_detect_pocket_tts_capabilities()` here
+    would import `pocket_tts` at plugin-import time and blow the
+    opm-check 500 ms budget. If a single-language pocket-tts is
+    installed, the runtime resolver in `_resolve_lang` will fall back
+    to english at speak() time.
+    """
+    config = {}
+    for lang in sorted(_DEFAULT_LANG_MAP.keys()):
+        config[lang] = [
+            {
+                "voice": voice_name,
+                "lang": lang,
+                "meta": {
+                    "gender": "male" if voice_name in ("marius", "javert", "jean") else "female",
+                    "display_name": f"Pocket TTS — {voice_name.title()} ({lang})",
+                    "offline": True,
+                    "priority": 60,
+                },
+            }
+            for voice_name in BUILTIN_VOICES
+        ]
+    return config
+
+
+PocketTTSPluginConfig = _build_plugin_config()

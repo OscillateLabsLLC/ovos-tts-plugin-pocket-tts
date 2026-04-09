@@ -46,7 +46,67 @@ On macOS, this is not needed — PyPI torch is already CPU-only (~60MB).
 
 ## Language support
 
-English only (for now — Kyutai's roadmap includes more languages).
+This plugin auto-detects which languages your installed `pocket-tts` supports.
+
+- **Legacy `pocket-tts` (≤ 1.1.1, current PyPI release):** English only.
+- **Multilingual `pocket-tts` (kyutai-labs/pocket-tts#155, not yet released):** English, French, German, Spanish, Italian, Portuguese.
+
+When the multilingual release lands on PyPI, just `pip install -U pocket-tts` and the plugin lights up the new languages automatically — no plugin upgrade required.
+
+### How language selection works
+
+The plugin maps the active OVOS language (BCP-47, e.g. `fr-FR`) to a kyutai pocket-tts model id. Defaults:
+
+| OVOS lang | Kyutai model     |
+| --------- | ---------------- |
+| `en`      | `english_v2`     |
+| `fr`      | `french_24l`     |
+| `de`      | `german_24l`     |
+| `es`      | `spanish_24l`    |
+| `it`      | `italian_24l`    |
+| `pt`      | `portuguese_24l` |
+
+Lookup tries the full BCP-47 tag first (e.g. `pt-br`), then falls back to the base subtag (`pt`), then to English. Unknown languages fall back to English with a log line.
+
+> **Note:** The `_24l` (24-layer) models are larger preview builds, not the final distilled releases. They are slower than the english defaults but support int8 quantization for a meaningful speedup. The plugin enables `quantize=True` automatically for any `*_24l` model. You can override per-language via the `quantize` config knob.
+
+### Override the language map
+
+If you want, for example, the older `english_v1` model, or to register a future regional model, set `language_aliases` in your config:
+
+```json
+{
+  "tts": {
+    "module": "ovos-tts-plugin-pocket-tts",
+    "ovos-tts-plugin-pocket-tts": {
+      "voice": "alba",
+      "language_aliases": {
+        "en": "english_v1",
+        "pt-br": "portuguese_brazil_24l"
+      },
+      "quantize": {
+        "french_24l": false
+      },
+      "preload_languages": ["en", "fr"]
+    }
+  }
+}
+```
+
+| Key                  | Type           | Default                       | Description                                                                           |
+| -------------------- | -------------- | ----------------------------- | ------------------------------------------------------------------------------------- |
+| `voice`              | str            | `"alba"`                      | Built-in voice name, `.wav`/`.safetensors` path, or `hf://` URI.                      |
+| `sample_rate`        | int            | `16000`                       | Output sample rate in Hz. The model is resampled if it differs.                       |
+| `language_aliases`   | dict           | `{}`                          | Override or extend the BCP-47 → kyutai model map. Full tags take precedence over base subtags. |
+| `quantize`           | bool or dict   | auto (`True` for `*_24l`)     | Force int8 quantization on/off. Pass a dict to control per kyutai model id.            |
+| `preload_languages`  | list[str]      | `[]`                          | BCP-47 codes to load eagerly during plugin init instead of lazy-loading on first use.  |
+| `enable_streaming`   | bool           | `false`                       | Use the streaming TTS path (recommended for low-latency setups).                       |
+
+> **Memory note:** Each loaded language model holds ~100M parameters in RAM (the `*_24l` previews are ~4× bigger before distillation). The plugin caches one model per used language, so leaving `preload_languages` empty and letting the cache warm on demand keeps the resident set small.
+
+## Roadmap
+
+- **SouraTTS** (emotional TTS built on pocket-tts) is being tracked as a separate plugin (`ovos-tts-plugin-soura-tts`) — its emotion/intensity dimensions don't fit the current OVOS TTS interface and bundling would tie pocket-tts upgrades to SouraTTS releases.
 
 ## License
 
