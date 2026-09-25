@@ -38,6 +38,12 @@ ovos-tts-plugin-pocket-tts = "ovos_tts_plugin_pocket_tts:PocketTTSPlugin"
 [project.entry-points."mycroft.plugin.tts.config"]
 "ovos-tts-plugin-pocket-tts.config" = "ovos_tts_plugin_pocket_tts:PocketTTSPluginConfig"
 
+[project.entry-points."opm.tts"]
+ovos-tts-plugin-pocket-tts = "ovos_tts_plugin_pocket_tts:PocketTTSPlugin"
+
+[project.entry-points."opm.tts.config"]
+"ovos-tts-plugin-pocket-tts.config" = "ovos_tts_plugin_pocket_tts:PocketTTSPluginConfig"
+
 [tool.hatch.version]
 path = "ovos_tts_plugin_pocket_tts/version.py"
 
