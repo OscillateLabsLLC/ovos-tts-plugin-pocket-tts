@@ -11,9 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-    # macos-14 keeps torch on the CPU-only PyPI wheel (~60 MB) instead of
+    # macos-15 keeps torch on the CPU-only PyPI wheel (~60 MB) instead of
     # the Linux CUDA wheel (~2.5 GB). pocket-tts is CPU-only anyway.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Set up python ${{ matrix.python-version }}
